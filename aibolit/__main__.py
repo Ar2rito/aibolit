@@ -59,9 +59,10 @@ def run_parse_args(commands_dict):
         description='Find the pattern which has the largest impact on readability',
         usage='''aibolit <command> [<args>]
 
-        You can run 1 command:
+        You can run 3 commands:
         train          Train model
-        recommend      Recommend pattern''')
+        recommend      Recommend pattern
+        version        Show version''')
 
     parser.add_argument('command', help='Subcommand to run')
     parser.add_argument(
@@ -137,6 +138,7 @@ def __count_value(value_dict, input_params, code_lines_dict, java_file: str, is_
     :return: None, it has side-effect
     """
     acronym = value_dict['code']
+    entity = 'metric' if is_metric else 'pattern'
     try:
         ast = AST.build_from_javalang(build_ast(java_file))
         val = value_dict['make']().value(ast)
@@ -145,9 +147,10 @@ def __count_value(value_dict, input_params, code_lines_dict, java_file: str, is_
             code_lines_dict['lines_' + acronym] = val
         else:
             input_params[acronym] = val
-    except Exception:
-        exc_type, exc_value, exc_tb = sys.exc_info()
-        raise Exception(f"Can't count {acronym} metric: {str(type(exc_value))}")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Can't count {acronym} {entity} on {java_file}: {exc}"
+        ) from exc
 
 
 def flatten(lst: List[List[Any]]) -> List[Any]:
@@ -442,8 +445,18 @@ def _extract_patterns_ignored(tree):
 
 
 def _process_components(components, args, classes_with_patterns_ignored, patterns_ignored):
-    """Process components to create results."""
+    """Process components to create results, dropping duplicate findings.
+
+    A class is decomposed into several components, each of which still holds the
+    original class-level node. Class-level patterns (e.g. ``er_class``,
+    ``non_final_class``) therefore fire once per component, reporting the same
+    violation many times and inflating its importance (see issue #1217). We keep
+    only the first finding for every ``(pattern_code, code_lines)`` pair, so an
+    identical violation is reported once while genuinely distinct findings on
+    other lines are preserved.
+    """
     results_list = []
+    seen = set()
     for lcom_component in components:
         code_lines_dict = lcom_component.get('code_lines_dict')
         input_params = lcom_component.get('input_params')
@@ -454,8 +467,15 @@ def _process_components(components, args, classes_with_patterns_ignored, pattern
             classes_with_patterns_ignored,
             patterns_ignored
         )
-        if ranked_results:
-            results_list.append(ranked_results)
+        unique_results = []
+        for pattern_item in ranked_results:
+            key = (pattern_item['pattern_code'], tuple(pattern_item['code_lines']))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_results.append(pattern_item)
+        if unique_results:
+            results_list.append(unique_results)
     return results_list
 
 
@@ -604,7 +624,10 @@ def create_xml_tree(results, full_report, cmd, exit_code):
         file = etree.SubElement(files, 'file')
         score_for_file = _process_file_result(file, result_for_file)
         if score_for_file is not None:
-            total_patterns += len(result_for_file['results'])
+            file_results = result_for_file['results']
+            if file_results and all(isinstance(item, list) for item in file_results):
+                file_results = flatten(file_results)
+            total_patterns += len(file_results)
             importances_for_all_classes.append(score_for_file)
 
     patterns_number_tag.text = str(total_patterns)

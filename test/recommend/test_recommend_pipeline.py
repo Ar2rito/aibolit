@@ -1,18 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2019-2026 Aibolit
 # SPDX-License-Identifier: MIT
 import os
+from argparse import Namespace
 from hashlib import md5
 from pathlib import Path
-from unittest import TestCase, skip
+from unittest import TestCase
+from unittest.mock import patch
 
 import javalang
 import javalang.tree
 
+from aibolit import __main__ as aibolit_main
 from aibolit.config import Config
 
 from aibolit.__main__ import list_dir, calculate_patterns_and_metrics, \
     create_xml_tree, create_text, format_converter_for_pattern, find_start_and_end_lines, \
-    find_annotation_by_node_type, add_pattern_if_ignored
+    find_annotation_by_node_type, add_pattern_if_ignored, _process_components, \
+    run_recommend_for_file
 
 
 class TestRecommendPipeline(TestCase):
@@ -157,7 +161,31 @@ class TestRecommendPipeline(TestCase):
     def test_xml(self):
         mock_input = self.__create_mock_input()
         mock_cmd = self.__create_mock_cmd()
-        create_xml_tree(mock_input, full_report=True, cmd=mock_cmd, exit_code=2)
+        root = create_xml_tree(mock_input, full_report=True, cmd=mock_cmd, exit_code=2)
+
+        self.assertEqual(root.findtext('./header/patterns'), '5')
+        self.assertEqual(len(root.findall('./files/file/patterns/pattern')), 5)
+
+    def test_count_value_keeps_original_exception_context(self):
+        value_dict = {
+            'code': 'P99',
+            'make': lambda: None,
+        }
+
+        with patch('aibolit.__main__.build_ast', side_effect=KeyError('missing node')):
+            with self.assertRaises(RuntimeError) as err:
+                getattr(aibolit_main, '__count_value')(
+                    value_dict,
+                    {},
+                    {},
+                    'broken/File.java',
+                )
+
+        self.assertEqual(
+            str(err.exception),
+            "Can't count P99 pattern on broken/File.java: 'missing node'",
+        )
+        self.assertIsInstance(err.exception.__cause__, KeyError)
 
     def test_text_format(self):
         mock_input = self.__create_mock_input()
@@ -172,13 +200,12 @@ class TestRecommendPipeline(TestCase):
         md5_hash = md5('\n'.join(text).encode('utf-8'))
         self.assertEqual(md5_hash.hexdigest(), 'bc22beda46ca18267a677eb32361a2aa')
 
-    @skip('It is flaky')
     def test_text_format_sort_by_code_line(self):
         mock_input = self.__create_mock_input()
         new_mock = format_converter_for_pattern(mock_input, 'code_line')
         text = create_text(new_mock, full_report=True)
         md5_hash = md5('\n'.join(text).encode('utf-8'))
-        self.assertEqual(md5_hash.hexdigest(), '62c794a9fad74c64eea7eb9a5e42e4c8')
+        self.assertEqual(md5_hash.hexdigest(), 'ae5af20f85585c64ba514783c6e0f3de')
 
     def test_find_start_end_line_function(self):
         # Check start and end line for MethodDeclaration,
@@ -329,3 +356,65 @@ class TestRecommendPipeline(TestCase):
         pattern_ignored = {'P14': [[60, 100]]}
         add_pattern_if_ignored(pattern_ignored, pattern_item, results)
         self.assertEqual(results[0]['code_lines'], pattern_item['code_lines'])
+
+    def test_process_components_deduplicates_class_level_findings(self):
+        # A class-level pattern (e.g. P4 "Prohibited class name") re-fires in
+        # every decomposed component, reporting the same line repeatedly with
+        # different importance values (issue #1217). Only one finding should
+        # survive.
+        component_findings = [
+            [{'code_lines': [6], 'pattern_code': 'P4',
+              'pattern_name': 'Prohibited class name', 'importance': 6.40}],
+            [{'code_lines': [6], 'pattern_code': 'P4',
+              'pattern_name': 'Prohibited class name', 'importance': 3.20}],
+            [{'code_lines': [6], 'pattern_code': 'P4',
+              'pattern_name': 'Prohibited class name', 'importance': 6.40}],
+        ]
+        components = [{'code_lines_dict': {}, 'input_params': {}, 'index': i}
+                      for i in range(len(component_findings))]
+        with patch('aibolit.__main__.create_results', side_effect=component_findings):
+            results = _process_components(components, args=None,
+                                          classes_with_patterns_ignored=[],
+                                          patterns_ignored={})
+        flat = [item for sublist in results for item in sublist]
+        self.assertEqual(len(flat), 1)
+        self.assertEqual(flat[0]['pattern_code'], 'P4')
+        self.assertEqual(flat[0]['code_lines'], [6])
+        self.assertEqual(flat[0]['importance'], 6.40)
+
+    def test_recommend_reports_class_level_pattern_once(self):
+        # End-to-end check for issue #1217: a class that decomposes into many
+        # components must not report the same class-level violation per
+        # component. No (pattern_code, code_lines) pair may appear twice.
+        file = Path(self.cur_file_dir, 'decomposition/ConfigManager.java')
+        args = Namespace(suppress=[], model=None, full=True)
+        result = run_recommend_for_file(str(file), args)
+
+        self.assertIsNone(result['exception'])
+        findings = [item for sublist in result['results'] for item in sublist]
+        keys = [(item['pattern_code'], tuple(item['code_lines'])) for item in findings]
+        self.assertEqual(sorted(keys), sorted(set(keys)), f'duplicate findings: {keys}')
+
+    def test_process_components_keeps_distinct_findings(self):
+        # The same pattern firing on different lines, or different patterns on
+        # the same line, are genuinely distinct and must be preserved.
+        component_findings = [
+            [{'code_lines': [10], 'pattern_code': 'P2',
+              'pattern_name': 'Assert in code', 'importance': 5.67}],
+            [{'code_lines': [20], 'pattern_code': 'P2',
+              'pattern_name': 'Assert in code', 'importance': 4.36}],
+            [{'code_lines': [10], 'pattern_code': 'P5',
+              'pattern_name': 'Force type casting', 'importance': 1.23}],
+        ]
+        components = [{'code_lines_dict': {}, 'input_params': {}, 'index': i}
+                      for i in range(len(component_findings))]
+        with patch('aibolit.__main__.create_results', side_effect=component_findings):
+            results = _process_components(components, args=None,
+                                          classes_with_patterns_ignored=[],
+                                          patterns_ignored={})
+        flat = [item for sublist in results for item in sublist]
+        self.assertEqual(len(flat), 3)
+        self.assertEqual(
+            {(item['pattern_code'], tuple(item['code_lines'])) for item in flat},
+            {('P2', (10,)), ('P2', (20,)), ('P5', (10,))},
+        )

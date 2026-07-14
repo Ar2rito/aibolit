@@ -24,13 +24,13 @@ dependencies = [
   "networkx==3.6.1",          # Updated to be compatible with NumPy 2.0+
   "numpy==2.4.6",
   "packaging==26.2",        # For version parsing, updated for sphinx compatibility
-  "pandas==3.0.3",
+  "pandas==3.0.4",
   "pebble==5.2.0",
   "requests==2.34.2",
   "scikit-learn==1.9.0",
   "scipy==1.17.1",
-  "setuptools==82.0.1",
-  "tqdm==4.68.3",
+  "setuptools==83.0.0",
+  "tqdm==4.68.4",
 ]
 
 classifiers = [
@@ -65,6 +65,12 @@ build-backend = "setuptools.build_meta"
 [tool.mypy]
 mypy_path = "stubs"
 
+[tool.bandit]
+# B301: pickle.load is used only to deserialize the bundled model file
+# (aibolit/binary_files/model.pkl) that ships with the package, not
+# untrusted input. The risk addressed by B301 does not apply here.
+skips = ["B301"]
+
 [tool.ruff.format]
 quote-style = "single"
 
@@ -86,12 +92,12 @@ dev = [
   "codecov==2.1.13",
   "flake8-elegant-objects==1.1.1",
   "flake8==7.3.0",
-  "mypy==2.1.0",                    # Update to a version compatible with Python 3.12
+  "mypy==2.3.0",                    # Update to a version compatible with Python 3.12
   "pylint==4.0.6",
   "pytest-cov==7.1.0",
   "pytest-testmon==2.2.0",
   "pytest==9.1.1",
-  "ruff==0.15.18",
+  "ruff==0.15.21",
   "sphinx==9.0.3",
-  "types-requests==2.33.0.20260518",
+  "types-requests==2.33.0.20260712",
 ]

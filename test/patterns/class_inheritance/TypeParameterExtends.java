@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2019-2026 Aibolit
 // SPDX-License-Identifier: MIT
 
-class Book {
-  void foo(String x) {
-    assert x != null; // here
-  }
+package patterns.class_inheritance;
+
+class GenericBox<T extends Number> {
 }
